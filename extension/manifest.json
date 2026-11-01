@@ -38,6 +38,16 @@
     },
     {
       "matches": [
+        "https://claude.ai/*"
+      ],
+      "js": [
+        "core/visible.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
         "https://chat.deepseek.com/*"
       ],
       "js": [
@@ -46,6 +56,26 @@
         "core/parser.js",
         "core/link.js",
         "providers/deepseek.js",
+        "core/icons.js",
+        "core/ui.js",
+        "core/agent.js",
+        "core/main.js"
+      ],
+      "css": [
+        "overlay.css"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://claude.ai/*"
+      ],
+      "js": [
+        "core/kit.js",
+        "core/config.js",
+        "core/parser.js",
+        "core/link.js",
+        "providers/claude.js",
         "core/icons.js",
         "core/ui.js",
         "core/agent.js",
@@ -72,7 +102,8 @@
         "icons/*.png"
       ],
       "matches": [
-        "https://chat.deepseek.com/*"
+        "https://chat.deepseek.com/*",
+        "https://claude.ai/*"
       ]
     }
   ]
