@@ -1,7 +1,5 @@
 // LuauPilot provider: Claude (claude.ai).
-//
 // Contract: implements LP.provider exactly as providers/deepseek.js does.
-//
 // Selectors marked [verify] could not be confirmed from public sources and MUST be
 // checked against the live DOM before first use (see CHECKLIST.md).
 //
@@ -21,8 +19,6 @@
   const kit = LP.kit;
 
   // ---------------------------------------------------------------- selectors
-  // Each entry is an ordered list; the first match wins. This mirrors the
-  // multi-strategy resolver used by ArcRift (last verified May 2026).
   const SEL = {
     user: [
       ".font-user-message",
@@ -113,21 +109,30 @@
     return out;
   }
 
-  // Claude's input cap is higher than DeepSeek's; 180k leaves a safe margin.
-  const SEND_MAX = 180000;
-  function clip(text) {
-    if (!text || text.length <= SEND_MAX) return text;
-    const gone = text.length - SEND_MAX;
-    const mark =
-      `\n\n[... LuaPilot: output shortened to fit Claude's input limit - ${gone} of ` +
-      `${text.length} characters omitted. Do NOT repeat the command; work with the head and tail shown. ...]\n\n`;
-    const room = SEND_MAX - mark.length;
-    const head = Math.floor(room * 0.85);
-    return text.slice(0, head) + mark + text.slice(text.length - (room - head));
+  // ---------------------------------------------------------------- dom cache
+  // MutationObserver-driven cache to avoid re-querying the DOM on every
+  // generating() call. Invalidated on any childList or characterData change
+  // inside the conversation container.
+  let cacheVersion = 0;
+  let lastCacheVersion = -1;
+  let cachedTurns = [];
+  let observer = null;
+
+  function invalidateCache() {
+    cacheVersion++;
   }
 
-  // ---------------------------------------------------------------- turns
-  function allTurns() {
+  function ensureObserver() {
+    if (observer) return;
+    const target = document.querySelector('main, [role="main"], body');
+    if (!target) return;
+    observer = new MutationObserver(() => invalidateCache());
+    observer.observe(target, { childList: true, subtree: true, characterData: true });
+  }
+
+  function getTurns() {
+    if (lastCacheVersion === cacheVersion) return cachedTurns;
+    ensureObserver();
     const turns = [];
     const seen = new Set();
 
@@ -145,26 +150,24 @@
       turns.push({ el, role: "assistant" });
     }
 
-    // Sort by document order. compareDocumentPosition is the only reliable way
-    // when elements come from different selector matches.
     turns.sort((a, b) => {
       if (a.el === b.el) return 0;
       const pos = a.el.compareDocumentPosition(b.el);
       return pos & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
     });
+
+    cachedTurns = turns;
+    lastCacheVersion = cacheVersion;
     return turns;
   }
 
-  const assistants = () => allTurns().filter((t) => t.role === "assistant");
+  const assistants = () => getTurns().filter((t) => t.role === "assistant");
   const lastAssistant = () => {
     const a = assistants();
     return a.length ? a[a.length - 1].el : null;
   };
 
   function skipNode(node) {
-    // Exclude reasoning and artifact chrome from text extraction. If a thinking
-    // block is not excluded, agent.js would read Claude's reasoning as Lua
-    // commands — this is the single most dangerous failure mode.
     for (const sel of SEL.thinking) if (node.matches && node.matches(sel)) return true;
     for (const sel of SEL.artifact) if (node.matches && node.matches(sel)) return true;
     return false;
@@ -177,7 +180,6 @@
       for (const sel of SEL.artifact) if (b.closest(sel)) return false;
       return true;
     });
-    // keep outermost only
     return found.filter((b) => !found.some((o) => o !== b && o.contains(b)));
   }
 
@@ -188,19 +190,15 @@
     return e ? (e.innerText || e.textContent || "") : "";
   };
 
-  /**
-   * Insert text into a ProseMirror contenteditable.
-   * innerHTML is discarded by ProseMirror; synthetic events are rejected as
-   * untrusted. execCommand('insertText') is the only path that drives the
-   * editor's transaction pipeline.
-   */
   function setEditable(ed, text) {
     if (!ed) return false;
     ed.focus();
     try {
       document.execCommand("selectAll");
       document.execCommand("delete");
-      if (document.execCommand("insertText", false, text)) return true;
+      document.execCommand("insertText", false, text);
+      const current = ed.innerText || ed.textContent || "";
+      if (current.trim() === text.trim()) return true;
     } catch {
       /* fall through */
     }
@@ -214,7 +212,8 @@
           cancelable: true,
         }),
       );
-      return true;
+      const current = ed.innerText || ed.textContent || "";
+      return current.trim() === text.trim();
     } catch {
       return false;
     }
@@ -260,9 +259,7 @@
 
   function generating() {
     try {
-      // A visible stop button is the strongest signal.
       if (stopButton()) return true;
-      // Otherwise, fall back to text growth.
       sample();
       return sMax > 1 && Date.now() - sAt < WINDOW_ANSWER;
     } catch {
@@ -271,10 +268,6 @@
   }
 
   // ---------------------------------------------------------------- vision
-  /**
-   * Be conservative: Claude supports images, but the file input may only exist
-   * after the "+" menu is opened. Claim vision only when the input is present.
-   */
   function vision() {
     const input = q(SEL.fileInput);
     if (!input) return false;
@@ -284,8 +277,7 @@
 
   // ---------------------------------------------------------------- notices
   function findNotice(re) {
-    // 1) leaf nodes near the newest turn (where Claude renders inline errors)
-    const turns = allTurns();
+    const turns = getTurns();
     const last = turns[turns.length - 1];
     if (last) {
       for (const el of qa("span, p, div", last.el.parentElement || last.el)) {
@@ -296,7 +288,6 @@
         }
       }
     }
-    // 2) toasts
     for (const sel of SEL.toast) {
       for (const el of qa(sel)) {
         if (own(el) || el.closest(".font-claude-response")) continue;
@@ -343,8 +334,6 @@
     } catch {
       return false;
     }
-    // Wait until a preview appears. The preview may be an <img src="blob:">
-    // or a background-image; check both.
     return kit.waitFor(() => {
       const imgs = qa('img[src^="blob:"]').filter(
         (im) => !im.closest(".font-claude-response"),
@@ -361,10 +350,9 @@
     const ed = editor();
     if (!ed) return false;
 
-    // Refuse to send while a reply is streaming.
     if (stopButton() && !(await kit.waitFor(() => !stopButton(), 5000))) return false;
 
-    const before = pickAll(SEL.user).length;
+    const before = getTurns().filter((t) => t.role === "user").length;
     if (!setEditable(ed, clip(text))) return false;
 
     const withImages = !!(images && images.length);
@@ -382,7 +370,7 @@
     while (Date.now() < deadline) {
       await kit.waitFor(sendReady, 800, 80);
 
-      if (pickAll(SEL.user).length > before || stopButton()) return true;
+      if (getTurns().filter((t) => t.role === "user").length > before || stopButton()) return true;
 
       const b = sendButton();
       if (b && clicks < 2) {
@@ -395,7 +383,7 @@
 
       if (
         await kit.waitFor(
-          () => pickAll(SEL.user).length > before || stopButton(),
+          () => getTurns().filter((t) => t.role === "user").length > before || stopButton(),
           2500,
           80,
         )
@@ -418,10 +406,8 @@
 
   function conversationKey() {
     const parts = location.pathname.split("/").filter(Boolean);
-    // /share/<id> is a frozen snapshot, not a live conversation.
     if (parts[0] === "share") return "";
     if (parts[0] === "chat" && parts[1]) return parts[1];
-    // Fallback: any UUID-looking segment.
     for (const p of parts) if (UUID_RE.test(p)) return p;
     return "";
   }
@@ -446,11 +432,10 @@
     recoverRate: true,
 
     turns() {
-      return allTurns().map((t) => ({ el: t.el, role: t.role }));
+      return getTurns().map((t) => ({ el: t.el, role: t.role }));
     },
 
     turnId() {
-      // Claude exposes no stable per-turn key; agent falls back to index+hash.
       return null;
     },
 
@@ -488,7 +473,7 @@
 
     isFresh() {
       return (
-        pickAll(SEL.user).length === 0 &&
+        getTurns().filter((t) => t.role === "user").length === 0 &&
         !!editor() &&
         !conversationKey()
       );
@@ -512,17 +497,25 @@
       }
     },
 
-    // Insert the LuaPilot bar just above the contenteditable.
     barSlot() {
       const ed = editor();
-      if (!ed || !ed.parentElement) return null;
-      return { parent: ed.parentElement, before: ed };
+      if (!ed) return null;
+      const send = sendButton();
+      let box = ed.parentElement;
+      while (box && box !== document.body) {
+        if (send && box.contains(send)) break;
+        box = box.parentElement;
+      }
+      if (!box || box === document.body) {
+        return { parent: ed.parentElement, before: ed };
+      }
+      const outer = box.parentElement || box;
+      return { parent: outer, before: box };
     },
 
     notice,
 
     continueButton() {
-      // Claude has no "Continue" button.
       return null;
     },
   };
